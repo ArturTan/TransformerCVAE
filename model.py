@@ -163,6 +163,7 @@ class Cond_Attention(GPT2Attention):
         key_z, value_z = z_conv.split(self.split_size, dim=2)
         key_z = self.split_heads(key_z, k=True)
         value_z = self.split_heads(value_z)
+        import pdb; pdb.set_trace()
         key = torch.cat((key_z, key), dim=-1)
         value = torch.cat((value_z, value), dim=-2)
 
