@@ -15,14 +15,13 @@ import torch.nn.functional as F
 import copy
 
 from transformers.modeling_utils import PreTrainedModel, Conv1D, prune_conv1d_layer, SequenceSummary
-from transformers.modeling_gpt2 import *
-from transformers.modeling_bert import gelu
-from transformers.configuration_gpt2 import GPT2Config
+from transformers.models.gpt2.modeling_gpt2 import *
+from transformers.activations import gelu
 from transformers.file_utils import add_start_docstrings
 
 
 ####################### auxiliary attention blocks #######################
-class Unmasked_Attention(Attention):
+class Unmasked_Attention(GPT2Attention):
     def _attn(self, q, k, v, attention_mask=None, head_mask=None):
         w = torch.matmul(q, k)
         if self.scale:
@@ -45,14 +44,14 @@ class Unmasked_Attention(Attention):
         return outputs
 
 
-class Unmasked_Block(Block):
+class Unmasked_Block(GPT2Block):
     def __init__(self, n_ctx, config, scale=False):
-        super(Block, self).__init__()
+        super(GPT2Block, self).__init__()
         nx = config.n_embd
         self.ln_1 = nn.LayerNorm(nx, eps=config.layer_norm_epsilon)
-        self.attn = Unmasked_Attention(nx, n_ctx, config, scale)
+        self.attn = Unmasked_Attention(config)
         self.ln_2 = nn.LayerNorm(nx, eps=config.layer_norm_epsilon)
-        self.mlp = MLP(4 * nx, config)
+        self.mlp = GPT2MLP(4 * nx, config)
 
 
 class AverageSelfAttention(nn.Module):
@@ -65,7 +64,6 @@ class AverageSelfAttention(nn.Module):
         self.non_linearity = gelu
 
     def forward(self, inputs, attention_mask=None):
-
         ##################################################################
         # STEP 1 - perform dot product
         # of the attention vector and each hidden state
@@ -97,9 +95,9 @@ class AverageSelfAttention(nn.Module):
 
 
 # Pseudo self-attention
-class Cond_Attention(Attention):
+class Cond_Attention(GPT2Attention):
     def __init__(self, nx, n_ctx, config, scale=False):
-        super(Attention, self).__init__()
+        super(GPT2Attention, self).__init__()
         self.output_attentions = config.output_attentions
 
         n_state = nx  # in Attention: n_state=768 (nx=n_embd)
@@ -124,13 +122,14 @@ class Cond_Attention(Attention):
         if self.scale:
             w = w / math.sqrt(v.size(-1))
         nd, ns = w.size(-2), w.size(-1)
-        b = self.bias[:, :, ns - nd : ns, :ns]
+        b = self.bias[:, :, ns - nd: ns, :ns]
         w = w * b - 1e4 * (1 - b)
 
         if attention_mask is not None:
             # add code here: w size has been bsz * n_heads * L * (L+1), mask bsz * 1 * 1 * L
             assert attention_mask.size()[-1] == w.size()[-1] - 1
-            zeros = torch.zeros(attention_mask.size()[:-1], device=attention_mask.device, dtype=attention_mask.dtype).unsqueeze(-1)
+            zeros = torch.zeros(attention_mask.size()[:-1], device=attention_mask.device,
+                                dtype=attention_mask.dtype).unsqueeze(-1)
             attention_mask = torch.cat((zeros, attention_mask), dim=-1)
 
             # Apply the attention mask
@@ -178,14 +177,14 @@ class Cond_Attention(Attention):
         return outputs  # a, present, (attentions)
 
 
-class Cond_Block(Block):
+class Cond_Block(GPT2Block):
     def __init__(self, n_ctx, config, scale=False):
-        super(Block, self).__init__()
+        super(GPT2Block, self).__init__()
         nx = config.n_embd
         self.ln_1 = nn.LayerNorm(nx, eps=config.layer_norm_epsilon)
         self.attn = Cond_Attention(nx, n_ctx, config, scale)
         self.ln_2 = nn.LayerNorm(nx, eps=config.layer_norm_epsilon)
-        self.mlp = MLP(4 * nx, config)
+        self.mlp = GPT2MLP(4 * nx, config)
 
     def forward(self, x, z, layer_past=None, attention_mask=None, head_mask=None):
         output_attn = self.attn(
@@ -207,7 +206,7 @@ class Encoder(GPT2Model):
         super(GPT2Model, self).__init__(config)
         self.output_hidden_states = config.output_hidden_states
         self.output_attentions = config.output_attentions
-        self.output_past = config.output_past
+        self.use_cache = config.use_cache
 
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.n_positions, config.n_embd)
@@ -323,7 +322,7 @@ class Encoder(GPT2Model):
             )
 
             hidden_states, present = outputs[:2]
-            if self.output_past:
+            if self.use_cache:
                 presents = presents + (present,)
 
             if self.output_attentions:
@@ -342,7 +341,7 @@ class Encoder(GPT2Model):
         logvar = self.logvar(representations)
 
         outputs = (mean, logvar, hidden_states,)
-        if self.output_past:
+        if self.use_cache:
             outputs = outputs + (presents,)
         if self.output_hidden_states:
             outputs = outputs + (all_hidden_states,)
@@ -366,7 +365,7 @@ class Decoder(GPT2Model):
 
         self.output_hidden_states = config.output_hidden_states
         self.output_attentions = config.output_attentions
-        self.output_past = config.output_past
+        self.use_cache = config.use_cache
 
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.n_positions, config.n_embd)
@@ -387,9 +386,9 @@ class Decoder(GPT2Model):
             else:
                 self.attn_proj = nn.Linear(nz, nx, bias=False)
 
-            self.h = nn.ModuleList([Cond_Block(config.n_ctx, config, scale=True) for _ in range(config.n_layer)])
+            self.h = nn.ModuleList([Cond_Block(config) for _ in range(config.n_layer)])
         else:
-            self.h = nn.ModuleList([Block(config.n_ctx, config, scale=True) for _ in range(config.n_layer)])
+            self.h = nn.ModuleList([GPT2Block(config) for _ in range(config.n_layer)])
         self.ln_f = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
 
         self.init_weights()
@@ -514,7 +513,7 @@ class Decoder(GPT2Model):
                 )
 
             hidden_states, present = outputs[:2]
-            if self.output_past:
+            if self.use_cache:
                 presents = presents + (present,)
 
             if self.output_attentions:
@@ -528,7 +527,7 @@ class Decoder(GPT2Model):
             all_hidden_states = all_hidden_states + (hidden_states,)
 
         outputs = (hidden_states,)
-        if self.output_past:
+        if self.use_cache:
             outputs = outputs + (presents,)
         if self.output_hidden_states:
             outputs = outputs + (all_hidden_states,)
@@ -555,7 +554,8 @@ class LM_head_rep(nn.Module):
 
 
 class VAEModel(GPT2LMHeadModel):
-    def __init__(self, config, add_input=False, add_attn=False, add_softmax=False, attn_proj_vary=False, learn_prior=False):
+    def __init__(self, config, add_input=False, add_attn=False, add_softmax=False, attn_proj_vary=False,
+                 learn_prior=False):
         super(GPT2LMHeadModel, self).__init__(config)
 
         # add code here
@@ -589,21 +589,21 @@ class VAEModel(GPT2LMHeadModel):
         return result.mean()
 
     def forward(
-        self,
-        input_ids=None,
-        past=None,
-        attention_mask=None,
-        token_type_ids=None,
-        position_ids=None,
-        head_mask=None,
-        inputs_embeds=None,
-        labels=None,
-        x_mask=None,
-        x_tokens=None,
-        y_mask=None,
-        y_tokens=None,
-        from_prior=False,
-        from_mean=False
+            self,
+            input_ids=None,
+            past=None,
+            attention_mask=None,
+            token_type_ids=None,
+            position_ids=None,
+            head_mask=None,
+            inputs_embeds=None,
+            labels=None,
+            x_mask=None,
+            x_tokens=None,
+            y_mask=None,
+            y_tokens=None,
+            from_prior=False,
+            from_mean=False
     ):
         # latent representation
         posterior_mean, posterior_logvar = self.encoder(input_ids=y_tokens, attention_mask=y_mask)[:2]

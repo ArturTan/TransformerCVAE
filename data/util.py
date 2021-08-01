@@ -14,7 +14,6 @@ import urllib.request
 import json, re
 import numpy as np
 from scipy.spatial.distance import cdist
-from bert_serving.client import BertClient
 from tqdm import trange
 from random import shuffle
 

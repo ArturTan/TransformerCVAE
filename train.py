@@ -12,12 +12,12 @@ from transformers import GPT2Tokenizer, GPT2LMHeadModel, GPT2Config, AdamW, get_
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 import importlib
-import logging
+
 import copy
 
-from apex.optimizers import FusedAdam
-from apex import amp
-from apex.fp16_utils import FP16_Optimizer
+# from apex.optimizers import FusedAdam
+# from apex import amp
+# from apex.fp16_utils import FP16_Optimizer
 
 from data.util import *
 from util import *
@@ -33,7 +33,7 @@ from sklearn.manifold import TSNE
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-
+import logging
 devices = '0'
 os.environ["CUDA_VISIBLE_DEVICES"] = devices
 
@@ -100,22 +100,22 @@ def train_step(device, model, optimizer, x_mask, x_tokens, y_mask, y_tokens, inp
         optimizer.zero_grad()
         loss, ce_loss, kl_loss = compute_loss_ae(device, model, x_mask, x_tokens, y_mask, y_tokens, input_tokens,
                                               target_tokens, mask, loss_fn, beta)
-        with amp.scale_loss(loss, optimizer) as scaled_loss:
-            scaled_loss.backward()
-            torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 5.0)  # max_grad_norm=1.0
-        # loss.backward()
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # max_grad_norm=1.0
+        # with amp.scale_loss(loss, optimizer) as scaled_loss:
+        #     scaled_loss.backward()
+        #     torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 5.0)  # max_grad_norm=1.0
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # max_grad_norm=1.0
         optimizer.step()
         output.append((loss.item(), ce_loss.mean().item(), kl_loss.item()))
 
     optimizer.zero_grad()
     loss, ce_loss, kl_loss = compute_loss(device, model, x_mask, x_tokens, y_mask, y_tokens, input_tokens,
                                           target_tokens, mask, loss_fn, beta)
-    with amp.scale_loss(loss, optimizer) as scaled_loss:
-        scaled_loss.backward()
-        torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 5.0)  # max_grad_norm=1.0
-    # loss.backward()
-    # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # max_grad_norm=1.0
+    # with amp.scale_loss(loss, optimizer) as scaled_loss:
+    #     scaled_loss.backward()
+    #     torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 5.0)  # max_grad_norm=1.0
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # max_grad_norm=1.0
     optimizer.step()
     output.append((loss.item(), ce_loss.mean().item(), kl_loss.item()))
 
@@ -228,60 +228,12 @@ def sample_sequence(model, tokenizer, length, batch_size=None, x_mask=None, x_to
     return output, probability
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('experiment', type=str)
-
-    # Default parameters are set based on single GPU training
-    parser.add_argument('--lr', type=float, default=5e-5)
-    parser.add_argument("--seed", type=int, default=0)
-
-    parser.add_argument('--data_type', type=str, default='t1', choices=['t' + str(i) for i in range(9)], help="t: type")
-    parser.add_argument('--model_type', type=str, default='cvae', choices=['cvae', 'ae_vae_fusion'])
-    parser.add_argument('--iterations', type=int, default=101640 * 4)  # wp 850001  wi 300001 ax 300001 yp 800001
-    parser.add_argument('--dataset', type=str, default='wi', choices=['ax', 'yp', 'wp', 'wi'], help="Dataset to use for training")
-    parser.add_argument('--warmup', type=int, default=10000,
-                        help="Amount of iterations to warmup, then decay. (-1 for no warmup and decay)")
-
-    parser.add_argument('--batch-sizes', nargs='+', type=int, default=[1],
-                        help='batch size per GPU. Lists the schedule.')
-    parser.add_argument('--seq-lens', nargs='+', type=int, default=[1024],
-                        help='seq length per sample. Lists the schedule.')
-    parser.add_argument('--switch-time', type=float, default=0,
-                        help="Percentage of iterations to spend on short sequence training.")
-    parser.add_argument('--data-dir', type=str, default='data')
-    parser.add_argument('--out-dir', type=str, default='out')
-    parser.add_argument('--load', type=str, help='path to load model from') # , default='out/test/'
-    parser.add_argument('--workers', default=1, type=int, metavar='N',
-                        help='number of data loading workers')
-    # use GPU
-    parser.add_argument('--gpu', default=0, type=int)
-    parser.add_argument('--no_gpu', action="store_true")
-
-    parser.add_argument('--fp16', action='store_true', help="Train using FP16?")
-    parser.add_argument('--fp16_opt_level', default='O0', type=str, required=False)
-
-    # KL cost annealing, increase beta from beta_0 to 1 in beta_warmup steps
-    parser.add_argument('--beta_0', default=1.00, type=float)
-    parser.add_argument('--beta_warmup', type=int, default=50000)
-    # cyc_vae parameters
-    parser.add_argument('--cycle', type=int, default=101640)
-
-    parser.add_argument('--add_input', action="store_true")
-    parser.add_argument('--add_attn', action="store_true")
-    parser.add_argument('--add_softmax', action="store_true")
-    parser.add_argument('--attn_proj_vary', action="store_true")
-
-    parser.add_argument('--learn_prior', action="store_true")
-
-    args = parser.parse_args('test --batch-sizes 1 --seq-lens 1024 '
-                             '--add_input --learn_prior --fp16'.split()) # wi.12.proj_vary_beta_cvae
+def main(args):
 
     if args.model_type == 'cvae':
         args.learn_prior = True
     else:
         args.learn_prior = False
-
     # GPU
     if not torch.cuda.is_available(): args.no_gpu = True
     gpu = not args.no_gpu
@@ -399,7 +351,7 @@ def main():
 
     optimizer = AdamW(VAE.parameters(), lr=args.lr, correct_bias=True)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_schedule)
-    VAE, optimizer = amp.initialize(VAE, optimizer, opt_level=args.fp16_opt_level)
+    # VAE, optimizer = amp.initialize(VAE, optimizer, opt_level=args.fp16_opt_level)
 
     loss_fn = nn.CrossEntropyLoss(reduction='none')
     print('Done.')
@@ -823,4 +775,53 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('experiment', type=str)
+
+    # Default parameters are set based on single GPU training
+    parser.add_argument('--lr', type=float, default=5e-5)
+    parser.add_argument("--seed", type=int, default=0)
+
+    parser.add_argument('--data_type', type=str, default='t1', choices=['t' + str(i) for i in range(9)], help="t: type")
+    parser.add_argument('--model_type', type=str, default='cvae', choices=['cvae', 'ae_vae_fusion'])
+    parser.add_argument('--iterations', type=int, default=101640 * 4)  # wp 850001  wi 300001 ax 300001 yp 800001
+    parser.add_argument('--dataset', type=str, default='wi', choices=['ax', 'yp', 'wp', 'wi'],
+                        help="Dataset to use for training")
+    parser.add_argument('--warmup', type=int, default=10000,
+                        help="Amount of iterations to warmup, then decay. (-1 for no warmup and decay)")
+
+    parser.add_argument('--batch-sizes', nargs='+', type=int, default=[1],
+                        help='batch size per GPU. Lists the schedule.')
+    parser.add_argument('--seq-lens', nargs='+', type=int, default=[1024],
+                        help='seq length per sample. Lists the schedule.')
+    parser.add_argument('--switch-time', type=float, default=0,
+                        help="Percentage of iterations to spend on short sequence training.")
+    parser.add_argument('--data-dir', type=str, default='data')
+    parser.add_argument('--out-dir', type=str, default='out')
+    parser.add_argument('--load', type=str, help='path to load model from')  # , default='out/test/'
+    parser.add_argument('--workers', default=1, type=int, metavar='N',
+                        help='number of data loading workers')
+    # use GPU
+    parser.add_argument('--gpu', default=0, type=int)
+    parser.add_argument('--no_gpu', action="store_true")
+
+    parser.add_argument('--fp16', action='store_true', help="Train using FP16?")
+    parser.add_argument('--fp16_opt_level', default='O0', type=str, required=False)
+
+    # KL cost annealing, increase beta from beta_0 to 1 in beta_warmup steps
+    parser.add_argument('--beta_0', default=1.00, type=float)
+    parser.add_argument('--beta_warmup', type=int, default=50000)
+    # cyc_vae parameters
+    parser.add_argument('--cycle', type=int, default=101640)
+
+    parser.add_argument('--add_input', action="store_true")
+    parser.add_argument('--add_attn', action="store_true")
+    parser.add_argument('--add_softmax', action="store_true")
+    parser.add_argument('--attn_proj_vary', action="store_true")
+
+    parser.add_argument('--learn_prior', action="store_true")
+
+    # args = parser.parse_args('test --batch-sizes 1 --seq-lens 1024 '
+    #                          '--add_input --learn_prior --fp16'.split()) # wi.12.proj_vary_beta_cvae
+    args = parser.parse_args()
+    main(args)
